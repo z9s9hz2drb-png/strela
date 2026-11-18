@@ -1,0 +1,47 @@
+# Codemagic (codemagic.io): free macOS M2 build minutes, works from a browser on iPad.
+# Sign in with GitHub → Add application → this repository → Start new build → "Strela unsigned IPA".
+workflows:
+  strela-unsigned:
+    name: Strela unsigned IPA
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      vars:
+        LIBXRAY_TAG: v26.11.9
+        LIBXRAY_TARGETS: ios
+        APP_BUNDLE_ID: com.example.strela
+        GOTOOLCHAIN: auto
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/Frameworks/LibXray.xcframework
+    scripts:
+      - name: Install Go, XcodeGen, ldid
+        script: |
+          brew install go xcodegen ldid || true
+          go version
+          xcodebuild -version
+      - name: Build LibXray (Xray-core)
+        script: |
+          set -o pipefail
+          mkdir -p build
+          if [ ! -d Frameworks/LibXray.xcframework ]; then
+            ./Scripts/build-libxray.sh 2>&1 | tee build/libxray.log
+          fi
+      - name: Generate Xcode project
+        script: xcodegen generate
+      - name: Build (unsigned)
+        script: |
+          set -o pipefail
+          xcodebuild -project Strela.xcodeproj -scheme Strela -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            APP_BUNDLE_ID="$APP_BUNDLE_ID" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build/xcodebuild.log
+      - name: Package IPA
+        script: ./Scripts/package-ipa.sh build/DerivedData/Build/Products/Release-iphoneos/Strela.app dist
+    artifacts:
+      - dist/*.ipa
+      - dist/*.tipa
+      - build/*.log

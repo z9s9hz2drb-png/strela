@@ -38,7 +38,7 @@ VPN на iOS работает только с правом **Network Extension**
 
 ### Вариант A — через GBox
 
-1. **Получите IPA.** Его собирает GitHub Actions на бесплатном Mac-сервере GitHub:
+1. **Получите IPA.** Его собирает облачный Mac. Если GitHub не даёт macOS-сервер (задача висит в очереди и отменяется), используйте **Codemagic**: войдите на codemagic.io через GitHub, нажмите **Add application** и выберите этот репозиторий. Затем запустите сборку **Strela unsigned IPA** (настройки в `codemagic.yaml`), а готовый IPA скачайте в разделе Artifacts. Сборка через GitHub Actions:
    - создайте репозиторий на GitHub и загрузите в него эту папку целиком, включая скрытую `.github` (на iPad удобно через приложение Working Copy);
    - **Actions → Build iOS → Run workflow**. Первая сборка идёт 20–40 минут, потому что ядро Xray компилируется из исходников; дальше оно берётся из кэша;
    - готовые файлы появятся в **Releases** (`build-N`): `Strela-unsigned.ipa` и `Strela-trollstore.tipa`.
