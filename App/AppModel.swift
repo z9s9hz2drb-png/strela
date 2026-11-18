@@ -173,6 +173,12 @@ final class AppModel {
         await updateSubscriptions(onlyDue: true)
     }
 
+    /// Called by iOS Background App Refresh (BGAppRefreshTask) while the app is closed.
+    func backgroundRefresh() async {
+        await updateSubscriptions(onlyDue: true)
+        BackgroundRefresh.schedule(afterHours: Double(state.settings.autoUpdateHours))
+    }
+
     private func applyAutoConnectType(_ type: String?, group: UUID) {
         switch type ?? "" {
         case "lowestdelay":
@@ -443,7 +449,8 @@ final class AppModel {
     }
 
     func updateSubscriptions(onlyDue: Bool) async {
-        let targets = state.subscriptions.filter { !onlyDue || $0.isDue }.map(\.id)
+        let defaultHours = state.settings.autoUpdateHours
+        let targets = state.subscriptions.filter { !onlyDue || $0.isDue(defaultHours: defaultHours) }.map(\.id)
         await withTaskGroup(of: Void.self) { group in
             for id in targets {
                 group.addTask { await self.updateSubscription(id) }
@@ -666,10 +673,16 @@ final class AppModel {
     private func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
+            var ticks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self else { return }
                 await self.poll()
+                ticks += 1
+                // While the app stays open, re-check subscription intervals every 15 minutes.
+                if ticks % 900 == 0, self.isForeground {
+                    await self.updateSubscriptions(onlyDue: true)
+                }
             }
         }
     }

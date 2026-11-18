@@ -25,7 +25,9 @@ env:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Intel runners: the macOS arm64 pool is often out of capacity for free accounts.
+    # Override with the repository variable MACOS_RUNNER (e.g. macos-15, macos-26).
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-15-intel' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -43,12 +45,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Frameworks/LibXray.xcframework
-          key: libxray-${{ env.LIBXRAY_TAG }}-${{ runner.os }}-v1
+          key: libxray-${{ env.LIBXRAY_TAG }}-ios-v1
 
       - name: Build LibXray (Xray-core)
         if: steps.libxray-cache.outputs.cache-hit != 'true'
         env:
           GOTOOLCHAIN: auto
+          LIBXRAY_TARGETS: ios
         run: |
           set -o pipefail
           mkdir -p build

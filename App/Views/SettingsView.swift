@@ -82,10 +82,12 @@ struct SettingsView: View {
                 }
                 Toggle("Шифрование подписок (age)", isOn: $model.state.settings.ageEncryption)
                 Toggle("Обновлять подписки при запуске", isOn: $model.state.settings.updateSubscriptionsOnOpen)
+                Stepper("Автообновление: каждые \(model.state.settings.autoUpdateHours) ч",
+                        value: $model.state.settings.autoUpdateHours, in: 1...72)
             } header: {
                 Text("Подписки")
             } footer: {
-                Text("HWID и модель устройства передаются в заголовках x-hwid, x-device-os, x-ver-os, x-device-model — так же, как в Happ (нужно для провайдеров с лимитом устройств).")
+                Text("Подписки обновляются при запуске, по интервалу провайдера (profile-update-interval) или по этому значению, в том числе в фоне, если включено «Обновление контента» для приложения. HWID и модель устройства передаются в заголовках x-hwid, x-device-os, x-ver-os, x-device-model, как в Happ.")
             }
 
             Section {

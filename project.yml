@@ -56,6 +56,8 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         AppGroupID: $(APP_GROUP_ID)
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [strela.subscriptions.refresh]
         CFBundleURLTypes:
           - CFBundleURLName: proxy-links
             CFBundleURLSchemes: [strela, happ, vless, vmess, trojan, ss, hy2, hysteria2]

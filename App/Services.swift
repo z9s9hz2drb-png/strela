@@ -1,3 +1,4 @@
+import BackgroundTasks
 import CryptoKit
 import Foundation
 import Security
@@ -294,6 +295,23 @@ actor CoreSandbox {
             XrayCore.stop()
             AppLog.write("Тест задержки: \(error.localizedDescription)")
             return failed
+        }
+    }
+}
+
+// MARK: - Background App Refresh
+
+enum BackgroundRefresh {
+    /// Listed in Info.plist → BGTaskSchedulerPermittedIdentifiers.
+    static let identifier = "strela.subscriptions.refresh"
+
+    static func schedule(afterHours hours: Double) {
+        let request = BGAppRefreshTaskRequest(identifier: identifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: max(1, hours) * 3600)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            AppLog.write("Фоновое обновление не запланировано: \(error.localizedDescription)")
         }
     }
 }

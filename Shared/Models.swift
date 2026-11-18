@@ -127,10 +127,11 @@ struct ProxySubscription: Codable, Identifiable, Hashable {
     var isJSON = false
     var nameLocked = false
 
-    var isDue: Bool {
+    /// Interval from the provider (`profile-update-interval`), otherwise the app default.
+    func isDue(defaultHours: Int) -> Bool {
         guard autoUpdate, options.autoUpdate != false else { return false }
         guard let lastUpdated else { return true }
-        let hours = max(1, updateIntervalHours ?? 12)
+        let hours = max(1, updateIntervalHours ?? defaultHours)
         return Date().timeIntervalSince(lastUpdated) > Double(hours) * 3600
     }
 }
@@ -282,6 +283,7 @@ struct AppSettings: Codable, Hashable {
     var autoProbeMinutes = 3
     var autoConnectOnLaunch = false
     var updateSubscriptionsOnOpen = true
+    var autoUpdateHours = 12
     var userAgent = "Strela/1.0"
     var sendHWID = true
     var ageEncryption = true
@@ -301,7 +303,7 @@ struct AppSettings: Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case pingType, testURL, pingTimeout, pingConcurrency, pingOnOpen, autoTopK, autoProbeMinutes
-        case autoConnectOnLaunch, updateSubscriptionsOnOpen, userAgent, sendHWID, ageEncryption
+        case autoConnectOnLaunch, updateSubscriptionsOnOpen, autoUpdateHours, userAgent, sendHWID, ageEncryption
         case onDemand, excludeLocalNetworks, includeAllNetworks, excludeAPNs, enableIPv6, mtu
         case sniffing, mux, fragment, logLevel, sortOrder
     }
@@ -318,6 +320,7 @@ struct AppSettings: Codable, Hashable {
         autoProbeMinutes = c.value(.autoProbeMinutes, d.autoProbeMinutes)
         autoConnectOnLaunch = c.value(.autoConnectOnLaunch, d.autoConnectOnLaunch)
         updateSubscriptionsOnOpen = c.value(.updateSubscriptionsOnOpen, d.updateSubscriptionsOnOpen)
+        autoUpdateHours = c.value(.autoUpdateHours, d.autoUpdateHours)
         userAgent = c.value(.userAgent, d.userAgent)
         sendHWID = c.value(.sendHWID, d.sendHWID)
         ageEncryption = c.value(.ageEncryption, d.ageEncryption)

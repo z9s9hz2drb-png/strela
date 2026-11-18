@@ -18,8 +18,13 @@ struct StrelaApp: App {
                     model.isForeground = phase == .active
                     if phase == .active {
                         Task { await model.didBecomeActive() }
+                    } else if phase == .background {
+                        BackgroundRefresh.schedule(afterHours: Double(model.state.settings.autoUpdateHours))
                     }
                 }
+        }
+        .backgroundTask(.appRefresh(BackgroundRefresh.identifier)) { [model] in
+            await model.backgroundRefresh()
         }
     }
 }

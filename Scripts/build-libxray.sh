@@ -15,6 +15,11 @@ git clone --depth 1 --branch "$LIBXRAY_TAG" https://github.com/XTLS/libXray.git 
 GOPATH_BIN="$(go env GOPATH)/bin"
 export PATH="$PATH:$GOPATH_BIN"
 cd "$WORK"
+# CI only needs the device slice; building all four platforms takes several times longer.
+if [ -n "${LIBXRAY_TARGETS:-}" ]; then
+  sed -i.bak "s/\"ios,iossimulator,macos,maccatalyst\"/\"${LIBXRAY_TARGETS}\"/" build/app/apple_gomobile.py
+  grep -q "\"${LIBXRAY_TARGETS}\"" build/app/apple_gomobile.py || { echo "Не удалось задать цели gomobile" >&2; exit 1; }
+fi
 # Official build script: pins Xray-core, installs gomobile/gobind, runs `gomobile bind`.
 python3 build/main.py apple gomobile
 
