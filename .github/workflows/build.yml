@@ -25,9 +25,13 @@ env:
 
 jobs:
   build:
-    # Intel runners: the macOS arm64 pool is often out of capacity for free accounts.
-    # Override with the repository variable MACOS_RUNNER (e.g. macos-15, macos-26).
-    runs-on: ${{ vars.MACOS_RUNNER || 'macos-15-intel' }}
+    # Free macOS runners are often out of capacity: the same build is queued on several runner
+    # types at once, and whichever starts first publishes the IPA to Releases.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -79,14 +83,15 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
+          name: build-logs-${{ matrix.runner }}
           path: build/*.log
 
       - name: Publish build log on failure
         if: failure()
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-log-${{ github.run_number }}
+          tag_name: build-log-${{ github.run_number }}-${{ matrix.runner }}
           name: Build log ${{ github.run_number }} (failed)
           prerelease: true
           files: build/*.log
@@ -96,11 +101,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Strela-unsigned
+          name: Strela-unsigned-${{ matrix.runner }}
           path: dist/*
 
       # IPA in Releases: easy to download on iPad (Safari → Files → share to GBox).
       - name: Publish IPA to Releases
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
