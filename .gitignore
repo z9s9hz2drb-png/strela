@@ -1,0 +1,12 @@
+Strela.xcodeproj/
+build/
+.build/
+dist/
+DerivedData/
+Frameworks/LibXray.xcframework/
+Configs/Local.xcconfig
+*.p8
+*.p12
+*.mobileprovision
+.DS_Store
+xcuserdata/

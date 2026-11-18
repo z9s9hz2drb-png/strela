@@ -1,0 +1,17 @@
+// Main identifiers. Change APP_BUNDLE_ID to your own (e.g. com.yourname.strela) —
+// or put overrides into Configs/Local.xcconfig (not committed), or pass them to xcodebuild.
+APP_BUNDLE_ID = com.example.strela
+APP_GROUP_ID = group.$(APP_BUNDLE_ID)
+
+// Your Apple Developer Team ID (10 characters, see developer.apple.com → Membership).
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Automatic
+
+// Only for manual signing (CI with your own profiles).
+APP_PROFILE_SPECIFIER =
+TUNNEL_PROFILE_SPECIFIER =
+
+MARKETING_VERSION = 1.0.0
+CURRENT_PROJECT_VERSION = 1
+
+#include? "Local.xcconfig"

@@ -1,0 +1,154 @@
+name: Build iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  LIBXRAY_TAG: v26.11.9
+  # Repository variable (Settings → Secrets and variables → Actions → Variables). Use your own id.
+  APP_BUNDLE_ID: ${{ vars.APP_BUNDLE_ID || 'com.example.strela' }}
+  # Secrets for TestFlight. If absent, only unsigned IPA / TrollStore builds are produced.
+  ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+  ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+  ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+  TEAM_ID: ${{ secrets.TEAM_ID }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode
+        run: xcodebuild -version
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Cache LibXray.xcframework
+        id: libxray-cache
+        uses: actions/cache@v4
+        with:
+          path: Frameworks/LibXray.xcframework
+          key: libxray-${{ env.LIBXRAY_TAG }}-${{ runner.os }}-v1
+
+      - name: Build LibXray (Xray-core)
+        if: steps.libxray-cache.outputs.cache-hit != 'true'
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          set -o pipefail
+          mkdir -p build
+          ./Scripts/build-libxray.sh 2>&1 | tee build/libxray.log
+
+      - name: Install XcodeGen and ldid
+        run: brew install xcodegen ldid
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild -project Strela.xcodeproj -scheme Strela -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            APP_BUNDLE_ID="$APP_BUNDLE_ID" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build/xcodebuild.log | grep -E "error:|warning: unable|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/DerivedData/Build/Products/Release-iphoneos/Strela.app
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/*.log
+
+      - name: Publish build log on failure
+        if: failure()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-log-${{ github.run_number }}
+          name: Build log ${{ github.run_number }} (failed)
+          prerelease: true
+          files: build/*.log
+
+      - name: Package unsigned IPA and TrollStore .tipa
+        run: ./Scripts/package-ipa.sh build/DerivedData/Build/Products/Release-iphoneos/Strela.app dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Strela-unsigned
+          path: dist/*
+
+      # IPA in Releases: easy to download on iPad (Safari → Files → share to GBox).
+      - name: Publish IPA to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Strela build {0}', github.run_number) }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: dist/*
+
+      - name: Archive, sign and upload to TestFlight
+        if: env.ASC_KEY_ID != '' && env.ASC_ISSUER_ID != '' && env.ASC_KEY_P8 != '' && env.TEAM_ID != ''
+        run: |
+          set -euo pipefail
+          KEY_PATH="$PWD/build/AuthKey_${ASC_KEY_ID}.p8"
+          if printf '%s' "$ASC_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "$ASC_KEY_P8" > "$KEY_PATH"
+          else
+            printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEY_PATH"
+          fi
+
+          # Temporary unlocked keychain for certificates created by Xcode cloud signing.
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security set-keychain-settings -lut 7200 build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+
+          AUTH=(-allowProvisioningUpdates
+                -authenticationKeyPath "$KEY_PATH"
+                -authenticationKeyID "$ASC_KEY_ID"
+                -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+
+          xcodebuild -project Strela.xcodeproj -scheme Strela -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath build/Strela.xcarchive \
+            APP_BUNDLE_ID="$APP_BUNDLE_ID" DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            "${AUTH[@]}" archive
+
+          cat > build/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><false/>
+            <key>manageAppVersionAndBuildNumber</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive -archivePath build/Strela.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist -exportPath build/export "${AUTH[@]}"
+          echo "Uploaded to App Store Connect → TestFlight (processing takes 5–30 min)."
