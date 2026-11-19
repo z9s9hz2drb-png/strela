@@ -236,8 +236,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                   let port = finalized.testPorts[tag] else { continue }
             jobs.append(LatencyTester.HTTPJob(id: id, port: port))
         }
-        let results = await LatencyTester.throughputSequential(
-            jobs, url: url, seconds: TimeInterval(max(2, request.seconds)), connectTimeout: 10)
+        let seconds = TimeInterval(max(2, request.seconds))
+        let results: [UUID: Double]
+        if request.upload {
+            // Upload body lives in memory: keep it small inside the 50 MB extension budget.
+            results = await LatencyTester.uploadSequential(
+                jobs, url: url, bytes: min(request.uploadBytes, 6 * 1024 * 1024), seconds: seconds, connectTimeout: 10)
+        } else {
+            results = await LatencyTester.throughputSequential(jobs, url: url, seconds: seconds, connectTimeout: 10)
+        }
         var response: [String: Double] = [:]
         for (id, value) in results { response[id.uuidString] = value }
         return SpeedResponse(results: response)

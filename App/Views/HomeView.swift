@@ -96,6 +96,8 @@ struct SelectionCard: View {
                                     await model.select(.auto(group))
                                 case 2:
                                     await model.select(.fastest(group))
+                                case 3:
+                                    await model.select(.fastestUpload(group))
                                 default:
                                     if let best = model.autoCandidates(group: group, count: 1).first {
                                         await model.select(.server(best.id))
@@ -106,10 +108,11 @@ struct SelectionCard: View {
                     )) {
                         Text("Вручную").tag(0)
                         Text("Пинг").tag(1)
-                        Text("Скорость").tag(2)
+                        Text("Скачивание").tag(2)
+                        Text("Передача").tag(3)
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 320)
+                    .frame(maxWidth: 440)
                 }
             }
             switch model.state.selection {
@@ -125,7 +128,9 @@ struct SelectionCard: View {
             case .auto(let group):
                 autoSummary(group)
             case .fastest(let group):
-                speedSummary(group)
+                speedSummary(group, metric: .download)
+            case .fastestUpload(let group):
+                speedSummary(group, metric: .upload)
             }
         }
     }
@@ -134,23 +139,25 @@ struct SelectionCard: View {
         switch model.state.selection {
         case .auto: return 1
         case .fastest: return 2
+        case .fastestUpload: return 3
         default: return 0
         }
     }
 
     @ViewBuilder
-    private func speedSummary(_ group: UUID) -> some View {
+    private func speedSummary(_ group: UUID, metric: SpeedMetric) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Label("Самый быстрый по скорости · \(model.groupTitle(group))", systemImage: "speedometer")
+                Label("Быстрее всех \(metric.accusative) · \(model.groupTitle(group))",
+                      systemImage: metric == .download ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.tint)
                 Spacer()
                 if model.speedTestingGroups.contains(group) {
                     ProgressView()
                 } else {
-                    Button("Тест скорости") {
-                        Task { await model.testSpeed(group: group) }
+                    Button("Тест") {
+                        Task { await model.testSpeed(group: group, metric: metric) }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -161,22 +168,31 @@ struct SelectionCard: View {
             }
             if model.vpn.isConnected, let status = model.tunnelStatus, let tag = status.activeAutoTag,
                let name = status.tagNames[tag] {
-                let speed = model.servers(in: group).first { $0.name == name }?.speedMbps
+                let score = model.servers(in: group).first(where: { $0.name == name })?.speedScore(metric)
                 ServerSummary(name: name,
-                              subtitle: "Сейчас используется" + (speed.map { $0 > 0 ? " · \(AppModel.formatMbps($0))" : "" } ?? ""),
+                              subtitle: "Сейчас используется" + scoreText(score, metric),
                               latency: status.observatory[tag].map { Int($0.delay) })
-            } else if let best = model.speedCandidates(group: group, count: 1).first, let mbps = best.speedMbps {
-                ServerSummary(name: best.name, subtitle: "Самый быстрый по последнему тесту · \(AppModel.formatMbps(mbps))",
+            } else if let best = model.speedCandidates(group: group, count: 1, metric: metric).first,
+                      let score = best.speedScore(metric) {
+                ServerSummary(name: best.name,
+                              subtitle: "Лучший по последнему тесту" + scoreText(score, metric),
                               latency: best.latency)
             } else {
                 Text("Скорость ещё не измерялась: тест запустится при подключении.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("Лучшие по пингу серверы по очереди скачивают тестовый файл (до \(model.state.settings.speedTestSeconds) с каждый). Подключение идёт к самому быстрому; если он перестаёт отвечать на GET-проверки, трафик переходит на следующий по скорости.")
+            Text(metric == .download
+                 ? "Лучшие по пингу серверы по очереди скачивают тестовый файл (до \(model.state.settings.speedTestSeconds) с). Подключение — к самому быстрому; если он перестаёт отвечать, трафик переходит на следующий по скорости."
+                 : "Лучшие по пингу серверы по очереди принимают от iPad тестовый файл \(model.state.settings.speedUploadMB) МБ (до \(model.state.settings.speedTestSeconds) с). Подключение — к самому быстрому на передачу; если он перестаёт отвечать, трафик переходит на следующий.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private func scoreText(_ score: Double?, _ metric: SpeedMetric) -> String {
+        guard let score, score > 0 else { return "" }
+        return " · \(metric.arrow) \(AppModel.formatMbps(score))"
     }
 
     @ViewBuilder

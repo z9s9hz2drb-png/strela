@@ -105,7 +105,8 @@ struct GroupRows: View {
         let servers = model.sortedServers(in: group)
         if servers.count > 1 {
             AutoRow(group: group)
-            SpeedAutoRow(group: group)
+            SpeedAutoRow(group: group, metric: .download)
+            SpeedAutoRow(group: group, metric: .upload)
         }
         ForEach(servers) { server in
             ServerRow(server: server, selected: model.state.selection == .server(server.id))
@@ -192,16 +193,18 @@ struct AutoRow: View {
 struct SpeedAutoRow: View {
     @Environment(AppModel.self) private var model
     let group: UUID
+    let metric: SpeedMetric
 
     var body: some View {
-        let selected = model.state.selection == .fastest(group)
-        let best = model.speedCandidates(group: group, count: 1).first
+        let selected = model.state.selection == AppModel.selectionForSpeed(group, metric)
+        let best = model.speedCandidates(group: group, count: 1, metric: metric).first
         HStack(spacing: 12) {
-            Image(systemName: selected ? "speedometer" : "gauge.with.dots.needle.33percent")
+            Image(systemName: metric == .download ? "arrow.down.circle" : "arrow.up.circle")
+                .symbolVariant(selected ? .fill : .none)
                 .font(.title3)
                 .foregroundStyle(selected ? Color.accentColor : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Автовыбор — самый быстрый по скорости")
+                Text("Автовыбор — быстрее всех \(metric.accusative)")
                     .fontWeight(.medium)
                 Text(subtitle(best))
                     .font(.caption)
@@ -213,7 +216,7 @@ struct SpeedAutoRow: View {
                 ProgressView()
             } else {
                 Button {
-                    Task { await model.testSpeed(group: group) }
+                    Task { await model.testSpeed(group: group, metric: metric) }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -223,16 +226,16 @@ struct SpeedAutoRow: View {
         .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onTapGesture {
-            Task { await model.select(.fastest(group)) }
+            Task { await model.select(AppModel.selectionForSpeed(group, metric)) }
         }
     }
 
     private func subtitle(_ best: ServerNode?) -> String {
         if model.speedTestingGroups.contains(group), let progress = model.speedProgress { return progress }
-        guard let best, let mbps = best.speedMbps, mbps > 0 else {
-            return "нажмите ↻, чтобы измерить скорость"
+        guard let best, let score = best.speedScore(metric), score > 0 else {
+            return "нажмите ↻, чтобы измерить скорость \(metric.accusative)"
         }
-        return "самый быстрый: \(best.name) · \(AppModel.formatMbps(mbps))"
+        return "лучший: \(best.name) · \(metric.arrow) \(AppModel.formatMbps(score))"
     }
 }
 
@@ -254,7 +257,10 @@ struct ServerRow: View {
             }
             Spacer()
             if let mbps = server.speedMbps {
-                SpeedBadge(mbps: mbps)
+                SpeedBadge(mbps: mbps, metric: .download)
+            }
+            if let mbps = server.uploadMbps {
+                SpeedBadge(mbps: mbps, metric: .upload)
             }
             LatencyBadge(ms: server.latency)
         }
@@ -264,12 +270,12 @@ struct ServerRow: View {
 
 struct SpeedBadge: View {
     let mbps: Double
+    let metric: SpeedMetric
 
     var body: some View {
-        Label(mbps > 0 ? AppModel.formatMbps(mbps) : "✕", systemImage: "arrow.down")
-            .labelStyle(.titleAndIcon)
+        Text("\(metric.arrow) " + (mbps > 0 ? AppModel.formatMbps(mbps) : "✕"))
             .font(.caption.monospacedDigit())
-            .foregroundStyle(mbps > 0 ? Color.blue : Color.red)
+            .foregroundStyle(mbps <= 0 ? Color.red : (metric == .download ? Color.blue : Color.purple))
     }
 }
 
@@ -301,9 +307,14 @@ struct SubscriptionHeader: View {
                         Label("Обновить", systemImage: "arrow.clockwise")
                     }
                     Button {
-                        Task { await model.testSpeed(group: subscription.id) }
+                        Task { await model.testSpeed(group: subscription.id, metric: .download) }
                     } label: {
-                        Label("Тест скорости", systemImage: "speedometer")
+                        Label("Тест скачивания", systemImage: "arrow.down.circle")
+                    }
+                    Button {
+                        Task { await model.testSpeed(group: subscription.id, metric: .upload) }
+                    } label: {
+                        Label("Тест передачи", systemImage: "arrow.up.circle")
                     }
                     Button {
                         newName = subscription.name

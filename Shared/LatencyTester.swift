@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 
 /// Latency measurement through local Xray HTTP inbounds (Proxy GET / HEAD) or plain TCP connect.
 enum LatencyTester {
@@ -84,6 +85,51 @@ enum LatencyTester {
             request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
             probe.start(session: session, task: session.dataTask(with: request), deadline: connectTimeout + seconds)
         }
+    }
+
+    /// Upload throughput (Mbit/s): POSTs `bytes` of random data through the HTTP proxy on 127.0.0.1:`port`.
+    /// Measured from the first sent byte until the server answers (it has received everything) or
+    /// until `seconds` pass. -1 on failure.
+    static func uploadThroughput(port: Int, url: URL, bytes: Int, seconds: TimeInterval,
+                                 connectTimeout: TimeInterval) async -> Double {
+        var body = Data(count: max(256 * 1024, bytes))
+        let count = body.count
+        let status = body.withUnsafeMutableBytes { buffer -> Int32 in
+            guard let base = buffer.baseAddress else { return -1 }
+            return SecRandomCopyBytes(kSecRandomDefault, count, base)
+        }
+        if status != errSecSuccess {
+            body = Data((0..<count).map { UInt8(truncatingIfNeeded: $0 &* 2654435761 >> 13) })
+        }
+        let payload = body
+        return await withCheckedContinuation { continuation in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.connectionProxyDictionary = [
+                "HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": port,
+                "HTTPSEnable": 1, "HTTPSProxy": "127.0.0.1", "HTTPSPort": port,
+            ]
+            configuration.timeoutIntervalForRequest = connectTimeout + seconds
+            configuration.urlCache = nil
+            let probe = UploadProbe(seconds: seconds, continuation: continuation)
+            let session = URLSession(configuration: configuration, delegate: probe, delegateQueue: nil)
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+                                     timeoutInterval: connectTimeout + seconds)
+            request.httpMethod = "POST"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+            probe.start(session: session, task: session.uploadTask(with: request, from: payload),
+                        deadline: connectTimeout + seconds)
+        }
+    }
+
+    static func uploadSequential(_ jobs: [HTTPJob], url: URL, bytes: Int, seconds: TimeInterval,
+                                 connectTimeout: TimeInterval) async -> [UUID: Double] {
+        var results: [UUID: Double] = [:]
+        for job in jobs {
+            results[job.id] = await uploadThroughput(port: job.port, url: url, bytes: bytes,
+                                                     seconds: seconds, connectTimeout: connectTimeout)
+        }
+        return results
     }
 
     /// One server at a time: parallel downloads would compete for the same link.
@@ -206,6 +252,77 @@ final class SpeedProbe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     }
 }
 
+/// Tracks how many body bytes were sent; the server's response marks the moment it got them all.
+final class UploadProbe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let seconds: TimeInterval
+    private var continuation: CheckedContinuation<Double, Never>?
+    private var session: URLSession?
+    private var sent: Int64 = 0
+    private var firstSend: UInt64 = 0
+    private var finished = false
+
+    init(seconds: TimeInterval, continuation: CheckedContinuation<Double, Never>) {
+        self.seconds = seconds
+        self.continuation = continuation
+    }
+
+    func start(session: URLSession, task: URLSessionTask, deadline: TimeInterval) {
+        lock.lock()
+        self.session = session
+        lock.unlock()
+        task.resume()
+        DispatchQueue.global().asyncAfter(deadline: .now() + deadline) { [weak self] in self?.finish() }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        lock.lock()
+        let isFirst = firstSend == 0
+        if isFirst { firstSend = DispatchTime.now().uptimeNanoseconds }
+        sent = totalBytesSent
+        lock.unlock()
+        if isFirst {
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let failed = (response as? HTTPURLResponse).map { $0.statusCode >= 400 } ?? false
+        completionHandler(.cancel)
+        finish(failed: failed)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        finish()
+    }
+
+    private func finish(failed: Bool = false) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let bytes = sent
+        let first = firstSend
+        let session = self.session
+        let continuation = self.continuation
+        self.session = nil
+        self.continuation = nil
+        lock.unlock()
+
+        session?.invalidateAndCancel()
+        let elapsed = first == 0 ? 0 : Double(DispatchTime.now().uptimeNanoseconds - first) / 1_000_000_000
+        var mbps = -1.0
+        if !failed, bytes >= 256 * 1024, elapsed > 0.2 {
+            mbps = Double(bytes) * 8 / elapsed / 1_000_000
+        }
+        continuation?.resume(returning: mbps)
+    }
+}
+
 /// Thread-safe "first caller wins" flag.
 final class OnceFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -251,6 +368,9 @@ struct SpeedRequest: Codable {
     var serverIDs: [UUID]
     var url: String
     var seconds: Int
+    /// true = upload ("передача"): POST `uploadBytes` to `url`.
+    var upload: Bool
+    var uploadBytes: Int
 }
 
 struct SpeedResponse: Codable {

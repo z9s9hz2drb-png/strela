@@ -125,8 +125,12 @@ final class VPNController {
         return results
     }
 
-    func speed(ids: [UUID], settings: EffectiveSettings) async throws -> [UUID: Double] {
-        let request = SpeedRequest(serverIDs: ids, url: settings.speedTestURL, seconds: settings.speedTestSeconds)
+    func speed(ids: [UUID], settings: EffectiveSettings, upload: Bool) async throws -> [UUID: Double] {
+        let request = SpeedRequest(serverIDs: ids,
+                                   url: upload ? settings.speedUploadURL : settings.speedTestURL,
+                                   seconds: settings.speedTestSeconds,
+                                   upload: upload,
+                                   uploadBytes: max(1, settings.speedUploadMB) * 1024 * 1024)
         let data = try await send(IPCRequest(command: .speed, speed: request))
         let response = try JSONDecoder().decode(SpeedResponse.self, from: data)
         var results: [UUID: Double] = [:]

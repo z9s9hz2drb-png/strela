@@ -35,10 +35,16 @@ struct SettingsView: View {
             }
 
             Section {
-                TextField("URL файла для теста", text: $model.state.settings.speedTestURL)
+                TextField("URL файла для скачивания", text: $model.state.settings.speedTestURL)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                TextField("URL для передачи (POST)", text: $model.state.settings.speedUploadURL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Stepper("Объём передачи: \(model.state.settings.speedUploadMB) МБ",
+                        value: $model.state.settings.speedUploadMB, in: 1...20)
                 Stepper("Длительность: \(model.state.settings.speedTestSeconds) с на сервер",
                         value: $model.state.settings.speedTestSeconds, in: 2...15)
                 Stepper("Серверов в тесте: \(model.state.settings.speedCandidates)",
@@ -46,7 +52,7 @@ struct SettingsView: View {
             } header: {
                 Text("Тест скорости")
             } footer: {
-                Text("Режим «Скорость»: сначала GET-пинг всей группы, потом лучшие по пингу серверы по очереди скачивают файл, и выбирается самый быстрый. По умолчанию файл 10 МБ, поэтому один тест расходует до 10 МБ на сервер.")
+                Text("Режимы «Скачивание» и «Передача»: сначала GET-пинг всей группы, потом лучшие по пингу серверы по очереди проверяются на скорость в своём направлении, и выбирается самый быстрый. Трафик за тест — до 10 МБ (скачивание) или до \(model.state.settings.speedUploadMB) МБ (передача) на сервер.")
             }
 
             Section {

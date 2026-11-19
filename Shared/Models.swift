@@ -12,8 +12,10 @@ enum ServerSelection: Codable, Hashable {
     case server(UUID)
     /// Automatic choice of the fastest server (Proxy GET) inside a group.
     case auto(UUID)
-    /// Automatic choice by measured transfer speed (download throughput), failover in speed order.
+    /// Automatic choice by measured download speed ("Скачивание"), failover in speed order.
     case fastest(UUID)
+    /// Automatic choice by measured upload speed ("Передача"), failover in speed order.
+    case fastestUpload(UUID)
 }
 
 // MARK: - Latency
@@ -60,6 +62,31 @@ enum ServerSortOrder: String, Codable, CaseIterable, Identifiable {
         case .alphabet: return "По алфавиту"
         }
     }
+}
+
+/// Direction a speed mode ranks servers by.
+enum SpeedMetric: String, Codable, CaseIterable, Identifiable {
+    case download
+    case upload
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .download: return "Скачивание"
+        case .upload: return "Передача"
+        }
+    }
+
+    /// "на скачивание" / "на передачу"
+    var accusative: String {
+        switch self {
+        case .download: return "на скачивание"
+        case .upload: return "на передачу"
+        }
+    }
+
+    var arrow: String { self == .download ? "↓" : "↑" }
 }
 
 struct FragmentSettings: Codable, Hashable {
@@ -168,7 +195,14 @@ struct ServerNode: Codable, Identifiable, Hashable {
     var testedAt: Date?
     /// Measured download throughput through the server, Mbit/s; -1 = test failed.
     var speedMbps: Double?
+    /// Measured upload throughput ("передача"), Mbit/s; -1 = test failed.
+    var uploadMbps: Double?
     var speedTestedAt: Date?
+
+    /// Value a speed mode sorts by; nil = not measured in this direction.
+    func speedScore(_ metric: SpeedMetric) -> Double? {
+        metric == .download ? speedMbps : uploadMbps
+    }
 
     var identityKey: String { link ?? outbound }
 
@@ -306,6 +340,8 @@ struct AppSettings: Codable, Hashable {
     var speedTestURL = "https://speed.cloudflare.com/__down?bytes=10000000"
     var speedTestSeconds = 4
     var speedCandidates = 5
+    var speedUploadURL = "https://speed.cloudflare.com/__up"
+    var speedUploadMB = 5
 
     init() {}
 
@@ -315,6 +351,7 @@ struct AppSettings: Codable, Hashable {
         case onDemand, excludeLocalNetworks, includeAllNetworks, excludeAPNs, enableIPv6, mtu
         case sniffing, mux, fragment, logLevel, sortOrder
         case speedTestURL, speedTestSeconds, speedCandidates
+        case speedUploadURL, speedUploadMB
     }
 
     init(from decoder: Decoder) throws {
@@ -347,6 +384,8 @@ struct AppSettings: Codable, Hashable {
         speedTestURL = c.value(.speedTestURL, d.speedTestURL)
         speedTestSeconds = c.value(.speedTestSeconds, d.speedTestSeconds)
         speedCandidates = c.value(.speedCandidates, d.speedCandidates)
+        speedUploadURL = c.value(.speedUploadURL, d.speedUploadURL)
+        speedUploadMB = c.value(.speedUploadMB, d.speedUploadMB)
     }
 }
 
@@ -372,6 +411,8 @@ struct EffectiveSettings {
     var speedTestURL: String
     var speedTestSeconds: Int
     var speedCandidates: Int
+    var speedUploadURL: String
+    var speedUploadMB: Int
 }
 
 struct GeoState: Codable, Hashable {
