@@ -18,6 +18,9 @@ enum BuildMode {
     case single(ServerNode)
     /// leastPing balancer over candidates, kept fresh by the observatory (HTTP GET probes).
     case auto([ServerNode])
+    /// Candidates ordered by measured speed (fastest first). The fastest alive one is used; when it
+    /// fails the GET probes, traffic moves to the next fastest (leastLoad with priority costs).
+    case speed([ServerNode])
 }
 
 struct BuildInput {
@@ -153,6 +156,26 @@ enum ConfigBuilder {
         var observatory: JSONObject?
         var proxyTarget: JSONObject = ["outboundTag": "proxy"]
         var fullConfig: JSONObject?
+        var priorityAuto = false
+
+        func addCandidates(_ servers: [ServerNode], prefix: String) {
+            for (index, server) in servers.enumerated() {
+                let tag = "\(prefix)\(index)"
+                do { try collector.add(server, tag: tag) } catch { continue }
+                serverTag[server.id] = tag
+                tagNames[tag] = server.name
+                autoTags.append(tag)
+            }
+        }
+
+        func observatoryConfig(_ prefix: String) -> JSONObject {
+            [
+                "subjectSelector": [prefix],
+                "probeURL": s.testURL,
+                "probeInterval": "\(max(1, s.autoProbeMinutes))m",
+                "enableConcurrency": true,
+            ]
+        }
 
         switch input.mode {
         case .single(let server):
@@ -165,13 +188,7 @@ enum ConfigBuilder {
                 tagNames["proxy"] = server.name
             }
         case .auto(let candidates):
-            for (index, server) in candidates.enumerated() {
-                let tag = "auto-\(index)"
-                do { try collector.add(server, tag: tag) } catch { continue }
-                serverTag[server.id] = tag
-                tagNames[tag] = server.name
-                autoTags.append(tag)
-            }
+            addCandidates(candidates, prefix: "auto-")
             guard let first = autoTags.first else { throw ConfigError.noServers }
             balancers = [[
                 "tag": "balancer",
@@ -179,13 +196,30 @@ enum ConfigBuilder {
                 "strategy": ["type": "leastPing"],
                 "fallbackTag": first,
             ]]
-            observatory = [
-                "subjectSelector": ["auto-"],
-                "probeURL": s.testURL,
-                "probeInterval": "\(max(1, s.autoProbeMinutes))m",
-                "enableConcurrency": true,
-            ]
+            observatory = observatoryConfig("auto-")
             proxyTarget = ["balancerTag": "balancer"]
+        case .speed(let candidates):
+            // At most 5: cost multipliers grow 150× per rank and must stay inside int64 nanoseconds.
+            addCandidates(Array(candidates.prefix(5)), prefix: "spd-")
+            guard let first = autoTags.first else { throw ConfigError.noServers }
+            // leastLoad sorts alive nodes by GET delay × sqrt(cost); sqrt(cost) = 150^rank turns the
+            // speed ranking into a strict priority list (any node slower than 3 s counts as down).
+            var costs: [JSONObject] = []
+            for (rank, tag) in autoTags.enumerated() {
+                costs.append(["regexp": false, "match": tag, "value": pow(150.0, Double(2 * rank))])
+            }
+            balancers = [[
+                "tag": "balancer",
+                "selector": ["spd-"],
+                "strategy": [
+                    "type": "leastLoad",
+                    "settings": ["expected": 1, "maxRTT": "3s", "costs": costs] as JSONObject,
+                ] as JSONObject,
+                "fallbackTag": first,
+            ]]
+            observatory = observatoryConfig("spd-")
+            proxyTarget = ["balancerTag": "balancer"]
+            priorityAuto = true
         }
 
         // Local HTTP inbounds that route straight to one server: used for Proxy GET tests while connected.
@@ -254,7 +288,8 @@ enum ConfigBuilder {
             tagNames: tagNames,
             autoTags: autoTags,
             serverDomains: collector.serverDomains,
-            createdAt: Date())
+            createdAt: Date(),
+            priorityAuto: priorityAuto ? true : nil)
     }
 
     /// Servers from JSON subscriptions keep their own routing/DNS ("works strictly by its source", as in Happ).

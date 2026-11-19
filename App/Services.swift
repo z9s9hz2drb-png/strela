@@ -262,6 +262,37 @@ actor CoreSandbox {
         try XrayCore.test(configJSON: copy)
     }
 
+    /// Speed test while the VPN is off: temporary Xray with one local HTTP inbound per server.
+    func speed(servers: [ServerNode], settings: EffectiveSettings) async -> [UUID: Double] {
+        guard !servers.isEmpty else { return [:] }
+        await acquire()
+        defer { release() }
+        var failed: [UUID: Double] = [:]
+        for server in servers { failed[server.id] = -1 }
+        guard let url = URL(string: settings.speedTestURL),
+              let built = ConfigBuilder.testConfig(servers: servers, settings: settings) else { return failed }
+        do {
+            let config = try ConfigFinalizer.finalize(configJSON: built.json, tunFD: nil,
+                                                      assetDir: Store.geoDir.path, hosts: [:])
+            XrayCore.stop()
+            try XrayCore.run(configJSON: config.json)
+            var jobs: [LatencyTester.HTTPJob] = []
+            for server in servers {
+                guard let tag = built.inbounds.first(where: { $0.value == server.id })?.key,
+                      let port = config.testPorts[tag] else { continue }
+                jobs.append(LatencyTester.HTTPJob(id: server.id, port: port))
+            }
+            let results = await LatencyTester.throughputSequential(
+                jobs, url: url, seconds: TimeInterval(max(2, settings.speedTestSeconds)), connectTimeout: 10)
+            XrayCore.stop()
+            return failed.merging(results) { _, new in new }
+        } catch {
+            XrayCore.stop()
+            AppLog.write("Тест скорости: \(error.localizedDescription)")
+            return failed
+        }
+    }
+
     func latency(servers: [ServerNode], settings: EffectiveSettings) async -> [UUID: Int] {
         guard !servers.isEmpty else { return [:] }
         await acquire()

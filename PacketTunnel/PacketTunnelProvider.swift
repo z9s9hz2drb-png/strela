@@ -163,6 +163,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     completionHandler?(Data("error: \(error.localizedDescription)".utf8))
                 }
             }
+        case .speed:
+            guard let speed = request.speed else {
+                completionHandler?(nil)
+                return
+            }
+            Task {
+                let response = await self.runSpeed(speed)
+                completionHandler?(try? JSONEncoder().encode(response))
+            }
         case .logs:
             let xray = Store.tail(of: Store.xrayLogURL, maxBytes: 64 * 1024)
             let app = Store.tail(of: Store.appLogURL, maxBytes: 32 * 1024)
@@ -180,6 +189,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         status.title = plan?.title ?? ""
         status.autoTags = plan?.autoTags ?? []
         status.tagNames = plan?.tagNames ?? [:]
+        status.priorityAuto = plan?.priorityAuto ?? false
         if let port = finalized?.metricsPort, let url = URL(string: "http://127.0.0.1:\(port)/debug/vars") {
             var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2)
             request.httpMethod = "GET"
@@ -214,6 +224,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         var response: [String: Int] = [:]
         for (id, value) in results { response[id.uuidString] = value }
         return PingResponse(results: response)
+    }
+
+    /// Download speed through each requested server, one after another (via local test inbounds).
+    private func runSpeed(_ request: SpeedRequest) async -> SpeedResponse {
+        let (plan, finalized) = snapshot()
+        guard let plan, let finalized, let url = URL(string: request.url) else { return SpeedResponse(results: [:]) }
+        var jobs: [LatencyTester.HTTPJob] = []
+        for id in request.serverIDs {
+            guard let tag = plan.testInbounds.first(where: { $0.value == id })?.key,
+                  let port = finalized.testPorts[tag] else { continue }
+            jobs.append(LatencyTester.HTTPJob(id: id, port: port))
+        }
+        let results = await LatencyTester.throughputSequential(
+            jobs, url: url, seconds: TimeInterval(max(2, request.seconds)), connectTimeout: 10)
+        var response: [String: Double] = [:]
+        for (id, value) in results { response[id.uuidString] = value }
+        return SpeedResponse(results: response)
     }
 
     // MARK: Helpers

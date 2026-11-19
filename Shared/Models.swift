@@ -12,6 +12,8 @@ enum ServerSelection: Codable, Hashable {
     case server(UUID)
     /// Automatic choice of the fastest server (Proxy GET) inside a group.
     case auto(UUID)
+    /// Automatic choice by measured transfer speed (download throughput), failover in speed order.
+    case fastest(UUID)
 }
 
 // MARK: - Latency
@@ -164,6 +166,9 @@ struct ServerNode: Codable, Identifiable, Hashable {
     /// Milliseconds; -1 means the test failed.
     var latency: Int?
     var testedAt: Date?
+    /// Measured download throughput through the server, Mbit/s; -1 = test failed.
+    var speedMbps: Double?
+    var speedTestedAt: Date?
 
     var identityKey: String { link ?? outbound }
 
@@ -298,6 +303,9 @@ struct AppSettings: Codable, Hashable {
     var fragment = FragmentSettings()
     var logLevel = "warning"
     var sortOrder: ServerSortOrder = .none
+    var speedTestURL = "https://speed.cloudflare.com/__down?bytes=10000000"
+    var speedTestSeconds = 4
+    var speedCandidates = 5
 
     init() {}
 
@@ -306,6 +314,7 @@ struct AppSettings: Codable, Hashable {
         case autoConnectOnLaunch, updateSubscriptionsOnOpen, autoUpdateHours, userAgent, sendHWID, ageEncryption
         case onDemand, excludeLocalNetworks, includeAllNetworks, excludeAPNs, enableIPv6, mtu
         case sniffing, mux, fragment, logLevel, sortOrder
+        case speedTestURL, speedTestSeconds, speedCandidates
     }
 
     init(from decoder: Decoder) throws {
@@ -335,6 +344,9 @@ struct AppSettings: Codable, Hashable {
         fragment = c.value(.fragment, d.fragment)
         logLevel = c.value(.logLevel, d.logLevel)
         sortOrder = c.value(.sortOrder, d.sortOrder)
+        speedTestURL = c.value(.speedTestURL, d.speedTestURL)
+        speedTestSeconds = c.value(.speedTestSeconds, d.speedTestSeconds)
+        speedCandidates = c.value(.speedCandidates, d.speedCandidates)
     }
 }
 
@@ -357,6 +369,9 @@ struct EffectiveSettings {
     var logLevel: String
     var routingEnabled: Bool
     var sortOrder: ServerSortOrder
+    var speedTestURL: String
+    var speedTestSeconds: Int
+    var speedCandidates: Int
 }
 
 struct GeoState: Codable, Hashable {
@@ -431,6 +446,8 @@ struct TunnelPlan: Codable {
     var createdAt: Date
     /// Same config without geoip/geosite rules: used by the extension if it cannot load geo files.
     var fallbackConfigJSON: String? = nil
+    /// Speed mode: candidates are a priority list (fastest first), not "lowest ping wins".
+    var priorityAuto: Bool? = nil
 }
 
 enum TunnelConstants {

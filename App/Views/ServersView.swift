@@ -105,6 +105,7 @@ struct GroupRows: View {
         let servers = model.sortedServers(in: group)
         if servers.count > 1 {
             AutoRow(group: group)
+            SpeedAutoRow(group: group)
         }
         ForEach(servers) { server in
             ServerRow(server: server, selected: model.state.selection == .server(server.id))
@@ -188,6 +189,53 @@ struct AutoRow: View {
     }
 }
 
+struct SpeedAutoRow: View {
+    @Environment(AppModel.self) private var model
+    let group: UUID
+
+    var body: some View {
+        let selected = model.state.selection == .fastest(group)
+        let best = model.speedCandidates(group: group, count: 1).first
+        HStack(spacing: 12) {
+            Image(systemName: selected ? "speedometer" : "gauge.with.dots.needle.33percent")
+                .font(.title3)
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Автовыбор — самый быстрый по скорости")
+                    .fontWeight(.medium)
+                Text(subtitle(best))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if model.speedTestingGroups.contains(group) {
+                ProgressView()
+            } else {
+                Button {
+                    Task { await model.testSpeed(group: group) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Task { await model.select(.fastest(group)) }
+        }
+    }
+
+    private func subtitle(_ best: ServerNode?) -> String {
+        if model.speedTestingGroups.contains(group), let progress = model.speedProgress { return progress }
+        guard let best, let mbps = best.speedMbps, mbps > 0 else {
+            return "нажмите ↻, чтобы измерить скорость"
+        }
+        return "самый быстрый: \(best.name) · \(AppModel.formatMbps(mbps))"
+    }
+}
+
 struct ServerRow: View {
     let server: ServerNode
     let selected: Bool
@@ -205,9 +253,23 @@ struct ServerRow: View {
                     .lineLimit(1)
             }
             Spacer()
+            if let mbps = server.speedMbps {
+                SpeedBadge(mbps: mbps)
+            }
             LatencyBadge(ms: server.latency)
         }
         .padding(.vertical, 2)
+    }
+}
+
+struct SpeedBadge: View {
+    let mbps: Double
+
+    var body: some View {
+        Label(mbps > 0 ? AppModel.formatMbps(mbps) : "✕", systemImage: "arrow.down")
+            .labelStyle(.titleAndIcon)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(mbps > 0 ? Color.blue : Color.red)
     }
 }
 
@@ -237,6 +299,11 @@ struct SubscriptionHeader: View {
                         Task { await model.updateSubscription(subscription.id) }
                     } label: {
                         Label("Обновить", systemImage: "arrow.clockwise")
+                    }
+                    Button {
+                        Task { await model.testSpeed(group: subscription.id) }
+                    } label: {
+                        Label("Тест скорости", systemImage: "speedometer")
                     }
                     Button {
                         newName = subscription.name

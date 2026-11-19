@@ -16,6 +16,9 @@ final class AppModel {
     let vpn = VPNController()
     var banner: Banner?
     var testingGroups: Set<UUID> = []
+    var speedTestingGroups: Set<UUID> = []
+    /// e.g. "Скорость 2/5: Netherlands" while a speed test runs.
+    var speedProgress: String?
     var updatingSubscriptions: Set<UUID> = []
     var isConnecting = false
     var tunnelStatus: TunnelStatus?
@@ -73,7 +76,7 @@ final class AppModel {
         switch state.selection {
         case .none: return nil
         case .server(let id): return server(id)?.groupID
-        case .auto(let group): return group
+        case .auto(let group), .fastest(let group): return group
         }
     }
 
@@ -86,6 +89,7 @@ final class AppModel {
         case .none: return "Сервер не выбран"
         case .server(let id): return server(id)?.name ?? "Сервер удалён"
         case .auto(let group): return "Автовыбор · \(groupTitle(group))"
+        case .fastest(let group): return "Самый быстрый · \(groupTitle(group))"
         }
     }
 
@@ -114,6 +118,14 @@ final class AppModel {
         return Array((alive.isEmpty ? list : alive).prefix(limit))
     }
 
+    /// Servers ranked by the last speed test (fastest first).
+    func speedCandidates(group: UUID, count: Int) -> [ServerNode] {
+        let measured = servers(in: group)
+            .filter { ($0.speedMbps ?? -1) > 0 }
+            .sorted { ($0.speedMbps ?? 0) > ($1.speedMbps ?? 0) }
+        return Array(measured.prefix(max(1, min(count, 5))))
+    }
+
     func effectiveSettings(for group: UUID?) -> EffectiveSettings {
         let s = state.settings
         let o = subscription(group)?.options ?? ProviderOptions()
@@ -140,7 +152,10 @@ final class AppModel {
             excludeAPNs: o.excludeAPNs ?? s.excludeAPNs,
             logLevel: s.logLevel,
             routingEnabled: state.routingEnabled,
-            sortOrder: o.sortOrder ?? s.sortOrder)
+            sortOrder: o.sortOrder ?? s.sortOrder,
+            speedTestURL: s.speedTestURL,
+            speedTestSeconds: s.speedTestSeconds,
+            speedCandidates: s.speedCandidates)
     }
 
     // MARK: - Lifecycle
@@ -209,6 +224,9 @@ final class AppModel {
             if case .auto(let group) = state.selection, needsFreshTest(group) {
                 await testLatency(group: group)
             }
+            if case .fastest(let group) = state.selection, needsFreshSpeed(group) {
+                await testSpeed(group: group)
+            }
             if state.routingEnabled, let profile = activeProfile, profile.needsGeo,
                !(GeoFiles.hasGeoIP && GeoFiles.hasGeoSite) {
                 await ensureGeoFiles(force: false)
@@ -246,6 +264,8 @@ final class AppModel {
             return
         case .auto(let group) where !servers(in: group).isEmpty:
             return
+        case .fastest(let group) where !servers(in: group).isEmpty:
+            return
         default:
             if let group = state.subscriptions.first(where: { !servers(in: $0.id).isEmpty })?.id {
                 state.selection = .auto(group)
@@ -255,6 +275,13 @@ final class AppModel {
                 throw ConfigError.noServers
             }
         }
+    }
+
+    /// Speed results older than 30 minutes (or none) are measured again before connecting.
+    private func needsFreshSpeed(_ group: UUID) -> Bool {
+        let tested = servers(in: group).filter { ($0.speedMbps ?? -1) > 0 }.compactMap(\.speedTestedAt)
+        guard let latest = tested.max() else { return true }
+        return Date().timeIntervalSince(latest) > 1800
     }
 
     private func needsFreshTest(_ group: UUID) -> Bool {
@@ -280,6 +307,12 @@ final class AppModel {
             guard !candidates.isEmpty else { throw ConfigError.noServers }
             mode = .auto(candidates)
             title = "Автовыбор · \(groupTitle(group))"
+        case .fastest(let group):
+            var candidates = speedCandidates(group: group, count: settings.speedCandidates)
+            if candidates.isEmpty { candidates = autoCandidates(group: group, count: settings.autoTopK) }
+            guard !candidates.isEmpty else { throw ConfigError.noServers }
+            mode = .speed(candidates)
+            title = "Самый быстрый · \(groupTitle(group))"
         }
         let testServers = group.map { Array(servers(in: $0).prefix(150)) } ?? []
         let input = BuildInput(
@@ -355,6 +388,55 @@ final class AppModel {
             }
         }
         scheduleSave()
+    }
+
+    /// "По скорости передачи": GET ping for the whole group, then a download test of the best
+    /// candidates one by one. While connected the test runs inside the tunnel extension.
+    func testSpeed(group: UUID) async {
+        guard !speedTestingGroups.contains(group) else { return }
+        speedTestingGroups.insert(group)
+        defer {
+            speedTestingGroups.remove(group)
+            speedProgress = nil
+        }
+        let settings = effectiveSettings(for: group)
+        speedProgress = "Проверка задержки…"
+        await testLatency(group: group)
+        let count = max(1, min(settings.speedCandidates, 10))
+        let candidates = autoCandidates(group: group, count: count).filter { ($0.latency ?? -1) > 0 }
+        guard !candidates.isEmpty else {
+            show("Нет доступных серверов для теста скорости", error: true)
+            return
+        }
+        let inTunnel = Set(vpn.activePlan?.testInbounds.values.map { $0 } ?? [])
+        var results: [UUID: Double] = [:]
+        for (index, server) in candidates.enumerated() {
+            speedProgress = "Скорость \(index + 1)/\(candidates.count): \(server.name)"
+            var value: Double?
+            if vpn.isConnected, inTunnel.contains(server.id) {
+                value = (try? await vpn.speed(ids: [server.id], settings: settings))?[server.id]
+            }
+            if value == nil {
+                value = await sandbox.speed(servers: [server], settings: settings)[server.id]
+            }
+            results[server.id] = value ?? -1
+            if let position = state.servers.firstIndex(where: { $0.id == server.id }) {
+                state.servers[position].speedMbps = value ?? -1
+                state.servers[position].speedTestedAt = Date()
+            }
+        }
+        scheduleSave()
+        if let best = candidates.max(by: { (results[$0.id] ?? -1) < (results[$1.id] ?? -1) }),
+           let mbps = results[best.id], mbps > 0 {
+            show("Самый быстрый: \(best.name) — \(Self.formatMbps(mbps))", error: false)
+        }
+        if case .fastest(let selected) = state.selection, selected == group {
+            await applyIfConnected()
+        }
+    }
+
+    static func formatMbps(_ value: Double) -> String {
+        value >= 100 ? "\(Int(value.rounded())) Мбит/с" : String(format: "%.1f Мбит/с", value)
     }
 
     func testAll() async {
@@ -509,6 +591,8 @@ final class AppModel {
                 node.id = previous.id
                 node.latency = previous.latency
                 node.testedAt = previous.testedAt
+                node.speedMbps = previous.speedMbps
+                node.speedTestedAt = previous.speedTestedAt
             }
             used.insert(node.id)
             merged.append(node)

@@ -35,6 +35,21 @@ struct SettingsView: View {
             }
 
             Section {
+                TextField("URL файла для теста", text: $model.state.settings.speedTestURL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Stepper("Длительность: \(model.state.settings.speedTestSeconds) с на сервер",
+                        value: $model.state.settings.speedTestSeconds, in: 2...15)
+                Stepper("Серверов в тесте: \(model.state.settings.speedCandidates)",
+                        value: $model.state.settings.speedCandidates, in: 1...5)
+            } header: {
+                Text("Тест скорости")
+            } footer: {
+                Text("Режим «Скорость»: сначала GET-пинг всей группы, потом лучшие по пингу серверы по очереди скачивают файл, и выбирается самый быстрый. По умолчанию файл 10 МБ, поэтому один тест расходует до 10 МБ на сервер.")
+            }
+
+            Section {
                 Toggle("Подключаться при запуске", isOn: $model.state.settings.autoConnectOnLaunch)
                 Toggle("VPN по требованию (всегда включён)", isOn: $model.state.settings.onDemand)
                 Toggle("Локальная сеть напрямую", isOn: $model.state.settings.excludeLocalNetworks)

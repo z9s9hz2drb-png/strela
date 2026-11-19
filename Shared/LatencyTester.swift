@@ -66,6 +66,36 @@ enum LatencyTester {
         var port: Int
     }
 
+    /// Download throughput (Mbit/s) through the HTTP proxy on 127.0.0.1:`port`.
+    /// Counts bytes from the first received byte for `seconds` (or until the file ends). -1 on failure.
+    static func throughput(port: Int, url: URL, seconds: TimeInterval, connectTimeout: TimeInterval) async -> Double {
+        await withCheckedContinuation { continuation in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.connectionProxyDictionary = [
+                "HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": port,
+                "HTTPSEnable": 1, "HTTPSProxy": "127.0.0.1", "HTTPSPort": port,
+            ]
+            configuration.timeoutIntervalForRequest = connectTimeout
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            configuration.urlCache = nil
+            let probe = SpeedProbe(seconds: seconds, continuation: continuation)
+            let session = URLSession(configuration: configuration, delegate: probe, delegateQueue: nil)
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: connectTimeout)
+            request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+            probe.start(session: session, task: session.dataTask(with: request), deadline: connectTimeout + seconds)
+        }
+    }
+
+    /// One server at a time: parallel downloads would compete for the same link.
+    static func throughputSequential(_ jobs: [HTTPJob], url: URL, seconds: TimeInterval,
+                                     connectTimeout: TimeInterval) async -> [UUID: Double] {
+        var results: [UUID: Double] = [:]
+        for job in jobs {
+            results[job.id] = await throughput(port: job.port, url: url, seconds: seconds, connectTimeout: connectTimeout)
+        }
+        return results
+    }
+
     struct TCPJob {
         var id: UUID
         var host: String
@@ -100,6 +130,79 @@ enum LatencyTester {
             }
         }
         return results
+    }
+}
+
+/// URLSession delegate that counts received bytes and discards the data (no memory growth).
+final class SpeedProbe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let seconds: TimeInterval
+    private var continuation: CheckedContinuation<Double, Never>?
+    private var session: URLSession?
+    private var received: Int64 = 0
+    private var firstByte: UInt64 = 0
+    private var finished = false
+
+    init(seconds: TimeInterval, continuation: CheckedContinuation<Double, Never>) {
+        self.seconds = seconds
+        self.continuation = continuation
+    }
+
+    func start(session: URLSession, task: URLSessionDataTask, deadline: TimeInterval) {
+        lock.lock()
+        self.session = session
+        lock.unlock()
+        task.resume()
+        DispatchQueue.global().asyncAfter(deadline: .now() + deadline) { [weak self] in self?.finish() }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            completionHandler(.cancel)
+            finish(failed: true)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let isFirst = firstByte == 0
+        if isFirst { firstByte = DispatchTime.now().uptimeNanoseconds }
+        received += Int64(data.count)
+        lock.unlock()
+        if isFirst {
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        finish()
+    }
+
+    private func finish(failed: Bool = false) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let bytes = received
+        let first = firstByte
+        let session = self.session
+        let continuation = self.continuation
+        self.session = nil
+        self.continuation = nil
+        lock.unlock()
+
+        session?.invalidateAndCancel()
+        let elapsed = first == 0 ? 0 : Double(DispatchTime.now().uptimeNanoseconds - first) / 1_000_000_000
+        var mbps = -1.0
+        if !failed, bytes >= 256 * 1024, elapsed > 0.2 {
+            mbps = Double(bytes) * 8 / elapsed / 1_000_000
+        }
+        continuation?.resume(returning: mbps)
     }
 }
 
@@ -141,6 +244,18 @@ enum IPCCommand: String, Codable {
     case ping
     case reload
     case logs
+    case speed
+}
+
+struct SpeedRequest: Codable {
+    var serverIDs: [UUID]
+    var url: String
+    var seconds: Int
+}
+
+struct SpeedResponse: Codable {
+    /// Server id (uuidString) → Mbit/s (-1 = failed).
+    var results: [String: Double]
 }
 
 struct PingRequest: Codable {
@@ -156,6 +271,7 @@ struct IPCRequest: Codable {
     var ping: PingRequest? = nil
     /// New plan for `reload` (the extension may not see the App Group file after re-signing).
     var plan: TunnelPlan? = nil
+    var speed: SpeedRequest? = nil
 }
 
 struct PingResponse: Codable {
@@ -179,9 +295,17 @@ struct TunnelStatus: Codable {
     var title = ""
     var autoTags: [String] = []
     var tagNames: [String: String] = [:]
+    var priorityAuto = false
 
-    /// What the leastPing balancer currently picks: the alive candidate with the lowest delay.
+    /// What the balancer currently picks: in speed mode the first alive candidate in speed order,
+    /// otherwise (leastPing) the alive candidate with the lowest delay.
     var activeAutoTag: String? {
+        if priorityAuto {
+            return autoTags.first { tag in
+                guard let observed = observatory[tag] else { return false }
+                return observed.alive && observed.delay < 3000
+            }
+        }
         var best: (tag: String, delay: Int64)?
         for tag in autoTags {
             guard let observed = observatory[tag], observed.alive else { continue }

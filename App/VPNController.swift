@@ -125,6 +125,17 @@ final class VPNController {
         return results
     }
 
+    func speed(ids: [UUID], settings: EffectiveSettings) async throws -> [UUID: Double] {
+        let request = SpeedRequest(serverIDs: ids, url: settings.speedTestURL, seconds: settings.speedTestSeconds)
+        let data = try await send(IPCRequest(command: .speed, speed: request))
+        let response = try JSONDecoder().decode(SpeedResponse.self, from: data)
+        var results: [UUID: Double] = [:]
+        for (key, value) in response.results {
+            if let id = UUID(uuidString: key) { results[id] = value }
+        }
+        return results
+    }
+
     func removeConfiguration() async {
         guard let manager else { return }
         manager.connection.stopVPNTunnel()

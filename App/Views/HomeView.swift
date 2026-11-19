@@ -88,22 +88,28 @@ struct SelectionCard: View {
                 Spacer()
                 if let group = model.activeGroupID {
                     Picker("Режим", selection: Binding(
-                        get: { isAuto ? 1 : 0 },
+                        get: { modeIndex },
                         set: { value in
                             Task {
-                                if value == 1 {
+                                switch value {
+                                case 1:
                                     await model.select(.auto(group))
-                                } else if let best = model.autoCandidates(group: group, count: 1).first {
-                                    await model.select(.server(best.id))
+                                case 2:
+                                    await model.select(.fastest(group))
+                                default:
+                                    if let best = model.autoCandidates(group: group, count: 1).first {
+                                        await model.select(.server(best.id))
+                                    }
                                 }
                             }
                         }
                     )) {
                         Text("Вручную").tag(0)
-                        Text("Авто").tag(1)
+                        Text("Пинг").tag(1)
+                        Text("Скорость").tag(2)
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 220)
+                    .frame(maxWidth: 320)
                 }
             }
             switch model.state.selection {
@@ -118,13 +124,59 @@ struct SelectionCard: View {
                 }
             case .auto(let group):
                 autoSummary(group)
+            case .fastest(let group):
+                speedSummary(group)
             }
         }
     }
 
-    private var isAuto: Bool {
-        if case .auto = model.state.selection { return true }
-        return false
+    private var modeIndex: Int {
+        switch model.state.selection {
+        case .auto: return 1
+        case .fastest: return 2
+        default: return 0
+        }
+    }
+
+    @ViewBuilder
+    private func speedSummary(_ group: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Самый быстрый по скорости · \(model.groupTitle(group))", systemImage: "speedometer")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.tint)
+                Spacer()
+                if model.speedTestingGroups.contains(group) {
+                    ProgressView()
+                } else {
+                    Button("Тест скорости") {
+                        Task { await model.testSpeed(group: group) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            if let progress = model.speedProgress, model.speedTestingGroups.contains(group) {
+                Text(progress).font(.caption).foregroundStyle(.secondary)
+            }
+            if model.vpn.isConnected, let status = model.tunnelStatus, let tag = status.activeAutoTag,
+               let name = status.tagNames[tag] {
+                let speed = model.servers(in: group).first { $0.name == name }?.speedMbps
+                ServerSummary(name: name,
+                              subtitle: "Сейчас используется" + (speed.map { $0 > 0 ? " · \(AppModel.formatMbps($0))" : "" } ?? ""),
+                              latency: status.observatory[tag].map { Int($0.delay) })
+            } else if let best = model.speedCandidates(group: group, count: 1).first, let mbps = best.speedMbps {
+                ServerSummary(name: best.name, subtitle: "Самый быстрый по последнему тесту · \(AppModel.formatMbps(mbps))",
+                              latency: best.latency)
+            } else {
+                Text("Скорость ещё не измерялась: тест запустится при подключении.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Лучшие по пингу серверы по очереди скачивают тестовый файл (до \(model.state.settings.speedTestSeconds) с каждый). Подключение идёт к самому быстрому; если он перестаёт отвечать на GET-проверки, трафик переходит на следующий по скорости.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
